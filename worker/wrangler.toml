@@ -39,7 +39,7 @@ crons = [
 binding = "DB"
 database_name = "matchday"
 # Filled in after `wrangler d1 create matchday`.
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "79111ff2-eaa4-4bb4-8ded-2e16fd930b49"
 migrations_dir = "migrations"
 
 # The football-data.org key is a SECRET, never a var:

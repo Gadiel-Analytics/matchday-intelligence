@@ -1,0 +1,46 @@
+name = "matchday-api"
+main = "src/index.ts"
+compatibility_date = "2026-06-23"
+
+[vars]
+ENVIRONMENT = "production"
+
+# Ingestion schedule (UTC — Cron Triggers have no timezone support and a
+# one-minute minimum granularity).
+#
+# Shape of the problem: six competitions, two endpoints each, against a ceiling
+# of ten requests per minute. A full sweep is twelve calls, so it cannot be
+# issued at once. Each run refreshes the next three competitions — six calls —
+# which completes a sweep in two runs with four calls of headroom to spare.
+#
+# 1) Match window, every 5 minutes, 11:00–23:59 UTC.
+#    European kickoffs run from late Saturday morning through midweek evening
+#    Champions League ties finishing near 23:00 UTC. A finished match therefore
+#    surfaces within about ten minutes.
+#
+# 2) Overnight baseline, every 2 hours, 00:00–10:00 UTC.
+#    No European fixture finishes in this window. The pass exists to catch a
+#    match that ran unusually long and to leave a fresh reading before the next
+#    day, not to chase results.
+#
+# 972 scheduled calls a day: no published daily cap on the feed's free tier, and
+# about 1% of the Workers free-tier request budget.
+#
+# NOTE: free-tier scores are delayed at source. Polling narrows the gap between
+# the feed publishing and this system displaying; it cannot make the feed itself
+# instant. Stated on the site rather than implied away.
+[triggers]
+crons = [
+  "*/5 11-23 * * *",
+  "0 0,2,4,6,8,10 * * *",
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "matchday"
+# Filled in after `wrangler d1 create matchday`.
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# The football-data.org key is a SECRET, never a var:
+#   npx wrangler secret put FOOTBALL_DATA_API_KEY --config worker/wrangler.toml

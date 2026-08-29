@@ -61,8 +61,8 @@ football-data.org ──► Scheduled ingester ──► D1 (SQLite at the edge)
    free tier             (Cloudflare Worker)          │
    10 req/min             holds the only              │
                           credential                  ▼
-                                              Read-only API ──► Pages (static SPA)
-                                               GET routes only    no secrets
+                                              Read-only API ──► Worker Static Assets
+                                               GET routes only    React SPA · no secrets
 ```
 
 Four moving parts. No queue, no cache layer, no orchestration — the load does not

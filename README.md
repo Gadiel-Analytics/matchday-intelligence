@@ -13,6 +13,13 @@ the ones that were wrong the first time.
 
 **[Open the live deployment →](https://matchday.gadielanalytics.com)**
 
+## Developer documentation
+
+Taking over the project or planning the next phase? Start here:
+
+- **[Developer handoff](docs/DEVELOPER_HANDOFF.md)** — architecture, repository map, invariants, local bootstrap and current V1 state.
+- **[Operations runbook](docs/OPERATIONS.md)** — deployments, D1 migrations, secrets, smoke tests, rollback and troubleshooting.
+
 ---
 
 ## The problem

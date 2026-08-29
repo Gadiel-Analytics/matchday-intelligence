@@ -9,6 +9,10 @@ that sit two things a scoreboard does not give you: comparative analysis across
 competitions, and a written record of every architectural trade-off — including
 the ones that were wrong the first time.
 
+[![Matchday Intelligence — live deployment](public/screenshot-hero.png)](https://matchday.gadielanalytics.com)
+
+**[Open the live deployment →](https://matchday.gadielanalytics.com)**
+
 ---
 
 ## The problem

@@ -174,10 +174,10 @@ function SystemDiagram() {
       <g>
         <rect x="750" y="112" width="142" height="88" rx="10" fill={BOX.fill} stroke={BOX.stroke} />
         <text x="821" y="146" textAnchor="middle" fontSize="12" fontWeight="600" fill="var(--color-ga-text-primary)">
-          Pages (SPA)
+          Worker Assets
         </text>
         <text x="821" y="164" textAnchor="middle" fontSize="10.5" fill="var(--color-ga-text-muted)">
-          static · no secrets
+          React SPA · no secrets
         </text>
         <text x="821" y="179" textAnchor="middle" fontSize="10.5" fill="var(--color-ga-text-muted)">
           this page

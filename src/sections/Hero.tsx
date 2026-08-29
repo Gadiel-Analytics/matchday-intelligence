@@ -22,16 +22,16 @@ export function Hero({ syncStatus, state }: HeroProps) {
             <p className="ga-eyebrow">Decision system · Football data</p>
 
             <h1 className="mt-5 text-4xl leading-[1.05] font-bold tracking-tight text-ga-text-primary sm:text-5xl lg:text-[3.4rem]">
-              One pipeline.
+              One decision system.
               <br />
-              <span className="ga-gradient-text">Two competition shapes.</span>
+              <span className="ga-gradient-text">Two data planes.</span>
             </h1>
 
             <p className="mt-6 max-w-xl text-[15px] leading-relaxed text-ga-text-secondary sm:text-base">
-              League football resolves by table. Knockout football resolves by elimination.
-              This system ingests both from a single feed, derives standings, form and
-              survival deterministically, and shows its working — including where the data
-              runs out.
+              Six European competitions are ingested live and resolved through league
+              tables. The World Cup knockout case study is preserved separately as a frozen
+              archive. Both surfaces derive their analytical views deterministically and show
+              their provenance — including where the data runs out.
             </p>
 
             <dl className="mt-9 grid max-w-lg grid-cols-3 gap-6 border-t border-ga-border-subtle pt-6">

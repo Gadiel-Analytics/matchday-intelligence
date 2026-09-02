@@ -13,25 +13,51 @@ ENVIRONMENT = "production"
 # issued at once. Each run refreshes the next three competitions — six calls —
 # which completes a sweep in two runs with four calls of headroom to spare.
 #
-# 1) Match window, every 5 minutes, 11:00–23:59 UTC.
-#    European kickoffs run from late Saturday morning through midweek evening
-#    Champions League ties finishing near 23:00 UTC. A finished match therefore
-#    surfaces within about ten minutes.
+# 1) Match window, 11:00–23:59 UTC. Designed as every 5 minutes, so a finished
+#    match surfaces within about ten minutes. European kickoffs run from late
+#    Saturday morning through midweek evening Champions League ties finishing
+#    near 23:00 UTC.
+#    CURRENTLY HOURLY under the containment note below.
 #
 # 2) Overnight baseline, every 2 hours, 00:00–10:00 UTC.
 #    No European fixture finishes in this window. The pass exists to catch a
 #    match that ran unusually long and to leave a fresh reading before the next
 #    day, not to chase results.
 #
-# 972 scheduled calls a day: no published daily cap on the feed's free tier, and
-# about 1% of the Workers free-tier request budget.
-#
 # NOTE: free-tier scores are delayed at source. Polling narrows the gap between
 # the feed publishing and this system displaying; it cannot make the feed itself
 # instant. Stated on the site rather than implied away.
+#
+# ---------------------------------------------------------------------------
+# TEMPORARY CONTAINMENT — remove at M5, restore "*/5 11-23 * * *".
+#
+# The scheduled ingester currently rewrites the whole stored season on every
+# run, so D1 rows written scale with season size x run count rather than with
+# how much actually changed. At */5 that demand is 1.8x-5.2x the 100k/day
+# account-wide D1 free limit, and the account has been exhausting it mid-day
+# every day -- blocking writes for every other database on the account too.
+#
+# Hourly caps the exposure at ~60.5k/day even against the model's upper bound
+# (516k x 19/162), which is the figure a containment measure has to be safe
+# against. Every 30 minutes was evaluated and rejected: ~102k/day worst case,
+# i.e. still over the limit.
+#
+# Cost, stated plainly: with ROTATION_SIZE = 3 a full sweep of six
+# competitions now takes two hours instead of ten minutes. Rotation cannot be
+# widened to compensate -- six competitions is twelve feed calls in one
+# minute, against a ceiling of ten.
+#
+# This is containment, not the fix. The fix is change-proportional writes;
+# once that ships and holds for 72h, restore the 5-minute cadence.
+# See docs/DEVELOPER_HANDOFF.md section 6.
+# ---------------------------------------------------------------------------
+#
+# 114 scheduled calls a day while contained (19 runs x 3 competitions x 2
+# endpoints); 972/day once the 5-minute cadence is restored.
 [triggers]
 crons = [
-  "*/5 11-23 * * *",
+  # TEMPORARY: hourly. Restore "*/5 11-23 * * *" at M5.
+  "0 11-23 * * *",
   "0 0,2,4,6,8,10 * * *",
 ]
 

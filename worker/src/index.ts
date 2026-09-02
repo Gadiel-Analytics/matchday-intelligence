@@ -253,11 +253,34 @@ export default {
     }
   },
 
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    // The scheduled time, not the wall clock: it is what decides whether this
+    // run uses the match window or reconciles the full season, and it stays
+    // correct if an invocation is delivered late.
     ctx.waitUntil(
-      runScheduledSync(env).then((summary) => {
+      runScheduledSync(env, new Date(event.scheduledTime)).then((summary) => {
+        const w = summary.writes
+
+        // Written counts are logged rather than stored: persisting them needs
+        // a schema change, and this change ships without one. `matches` below
+        // is what the run COVERED; `wrote` is what it actually changed, and on
+        // a healthy quiet run that second number is 0.
         console.log(
-          `sync competitions=${summary.competitions.join(',')} matches=${summary.matchesIngested} standings=${summary.standingsIngested} unresolved=${summary.unresolved} errors=${summary.errors.length}`,
+          `sync competitions=${summary.competitions.join(',')} ` +
+            `matches=${summary.matchesIngested} standings=${summary.standingsIngested} ` +
+            `unresolved=${summary.unresolved} errors=${summary.errors.length} ` +
+            `wrote=${
+              w.matchesInserted +
+              w.matchesUpdated +
+              w.standingsInserted +
+              w.standingsUpdated +
+              w.standingsRemoved +
+              w.competitionsWritten
+            } ` +
+            `matchIns=${w.matchesInserted} matchUpd=${w.matchesUpdated} ` +
+            `matchSame=${w.matchesUnchanged} standIns=${w.standingsInserted} ` +
+            `standUpd=${w.standingsUpdated} standDel=${w.standingsRemoved} ` +
+            `standSame=${w.standingsUnchanged} compWrote=${w.competitionsWritten}`,
         )
       }),
     )

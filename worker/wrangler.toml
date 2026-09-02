@@ -43,9 +43,10 @@ ENVIRONMENT = "production"
 # i.e. still over the limit.
 #
 # Cost, stated plainly: with ROTATION_SIZE = 3 a full sweep of six
-# competitions now takes two hours instead of ten minutes. Rotation cannot be
-# widened to compensate -- six competitions is twelve feed calls in one
-# minute, against a ceiling of ten.
+# competitions takes two hours during the match window, and four hours
+# overnight where the cadence is itself two-hourly -- against ten minutes
+# before. Rotation cannot be widened to compensate: six competitions is
+# twelve feed calls in one minute, against a ceiling of ten.
 #
 # This is containment, not the fix. The fix is change-proportional writes;
 # once that ships and holds for 72h, restore the 5-minute cadence.

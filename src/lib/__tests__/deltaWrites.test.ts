@@ -7,6 +7,7 @@ import {
   planCompetitionWrite,
   planMatchWrites,
   planStandingWrites,
+  planStandingsTransition,
   matchColumns,
   standingColumns,
   readTotalStandings,
@@ -223,14 +224,18 @@ describe('planStandingWrites', () => {
 ------------------------------------------------------------------------- */
 
 describe('readTotalStandings', () => {
-  it('accepts a populated TOTAL table', () => {
-    const check = readTotalStandings(
-      { standings: [{ type: 'TOTAL', table: [feedStanding()] }] },
-      'PL',
+  const table = (rows: FdStanding[]) => ({ standings: [{ type: 'TOTAL', table: rows }] })
+
+  const fullTable = (count = 20) =>
+    Array.from({ length: count }, (_, index) =>
+      feedStanding({ position: index + 1, team: { id: 100 + index } }),
     )
 
+  it('accepts a populated, well-formed TOTAL table', () => {
+    const check = readTotalStandings(table(fullTable()), 'PL')
+
     expect(check.ok).toBe(true)
-    if (check.ok) expect(check.rows).toHaveLength(1)
+    if (check.ok) expect(check.rows).toHaveLength(20)
   })
 
   it.each([
@@ -238,8 +243,7 @@ describe('readTotalStandings', () => {
     ['no standings array', {}],
     ['standings present but no TOTAL table', { standings: [{ type: 'HOME', table: [feedStanding()] }] }],
     ['TOTAL present but table missing', { standings: [{ type: 'TOTAL' }] }],
-    ['TOTAL present but table empty', { standings: [{ type: 'TOTAL', table: [] }] }],
-    ['TOTAL rows carry no team id', { standings: [{ type: 'TOTAL', table: [{ ...feedStanding(), team: {} } as FdStanding] }] }],
+    ['TOTAL present but table empty', table([])],
   ])('rejects %s rather than emptying the stored table', (_label, payload) => {
     const check = readTotalStandings(payload as never, 'PL')
 
@@ -247,16 +251,115 @@ describe('readTotalStandings', () => {
     if (!check.ok) expect(check.reason).toBeTruthy()
   })
 
-  it('a rejected payload can produce no destructive plan, because no rows reach one', () => {
-    const stored = storedStandingsFrom([standing(), standing({ team: { id: 65 } })])
-    const check = readTotalStandings({ standings: [{ type: 'TOTAL', table: [] }] }, 'PL')
+  // The failure mode that matters: structurally broken payloads must not be
+  // salvaged into a shorter table, because a shorter table means deletions.
+  it('rejects a mostly-valid table containing one row without a team id', () => {
+    const rows = fullTable()
+    rows[7] = { ...feedStanding(), team: {} } as FdStanding
+
+    const check = readTotalStandings(table(rows), 'PL')
 
     expect(check.ok).toBe(false)
+    if (!check.ok) expect(check.reason).toMatch(/team id/)
+  })
 
-    // Guarding at the payload is what matters: had the empty table been let
-    // through, the plan would have removed every stored row.
-    const hypothetical = planStandingWrites([], stored)
-    expect(hypothetical.removals).toHaveLength(2)
+  it('does not silently filter a malformed row down to a shorter usable table', () => {
+    const rows = fullTable()
+    rows[0] = { ...feedStanding(), team: {} } as FdStanding
+
+    const check = readTotalStandings(table(rows), 'PL')
+
+    // 19 salvageable rows is exactly what must NOT come back.
+    expect(check).not.toHaveProperty('rows')
+  })
+
+  it('rejects a table that lists the same team twice', () => {
+    const rows = fullTable()
+    rows[5] = feedStanding({ position: 6, team: { id: rows[4].team.id } })
+
+    const check = readTotalStandings(table(rows), 'PL')
+
+    expect(check.ok).toBe(false)
+    if (!check.ok) expect(check.reason).toMatch(/more than once/)
+  })
+
+  it('gives a rejected payload no rows, so no write plan can be built from one', () => {
+    const check = readTotalStandings(table([]), 'PL')
+
+    expect(check.ok).toBe(false)
+    expect(check).not.toHaveProperty('rows')
+  })
+})
+
+/* -------------------------------------------------------------------------
+   The transition guard: cardinality, not a tuned percentage
+------------------------------------------------------------------------- */
+
+describe('planStandingsTransition', () => {
+  const league = (ids: number[]) =>
+    ids.map((id, index) => standing({ position: index + 1, team: { id } }))
+
+  const twenty = Array.from({ length: 20 }, (_, index) => 100 + index)
+
+  it('applies a table of equal cardinality', () => {
+    const stored = storedStandingsFrom(league(twenty))
+    const transition = planStandingsTransition(league(twenty), stored)
+
+    expect(transition.ok).toBe(true)
+    if (transition.ok) expect(transition.plan.unchanged).toBe(20)
+  })
+
+  it('allows promotion and relegation, where cardinality is preserved', () => {
+    const stored = storedStandingsFrom(league(twenty))
+    const next = league([...twenty.slice(0, 17), 900, 901, 902])
+
+    const transition = planStandingsTransition(next, stored)
+
+    expect(transition.ok).toBe(true)
+    if (transition.ok) {
+      expect(transition.plan.inserts.map((row) => row.team_id)).toEqual([900, 901, 902])
+      expect(transition.plan.removals).toEqual([117, 118, 119])
+    }
+  })
+
+  it('allows growth', () => {
+    const stored = storedStandingsFrom(league(twenty.slice(0, 18)))
+    const transition = planStandingsTransition(league(twenty), stored)
+
+    expect(transition.ok).toBe(true)
+    if (transition.ok) expect(transition.plan.inserts).toHaveLength(2)
+  })
+
+  it('refuses a single unexplained lost team', () => {
+    const stored = storedStandingsFrom(league(twenty))
+    const transition = planStandingsTransition(league(twenty.slice(0, 19)), stored)
+
+    expect(transition.ok).toBe(false)
+    if (!transition.ok) expect(transition.reason).toMatch(/19 teams against 20 stored/)
+  })
+
+  it('refuses a badly truncated table', () => {
+    const stored = storedStandingsFrom(league(twenty))
+    const transition = planStandingsTransition(league(twenty.slice(0, 3)), stored)
+
+    expect(transition.ok).toBe(false)
+  })
+
+  it('produces no plan at all when it refuses, so nothing can reach execution', () => {
+    const stored = storedStandingsFrom(league(twenty))
+    const transition = planStandingsTransition(league(twenty.slice(0, 3)), stored)
+
+    expect(transition).not.toHaveProperty('plan')
+
+    // Without the guard this is what would have been applied.
+    expect(planStandingWrites(league(twenty.slice(0, 3)), stored).removals).toHaveLength(17)
+  })
+
+  it('lets a competition populate from empty, so a new season can bootstrap', () => {
+    const transition = planStandingsTransition(league(twenty), new Map())
+
+    expect(transition.ok).toBe(true)
+    if (transition.ok) expect(transition.plan.inserts).toHaveLength(20)
   })
 })
 

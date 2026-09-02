@@ -720,6 +720,69 @@ export type StandingsTransition =
   | { ok: true; plan: StandingsWritePlan }
   | { ok: false; reason: string }
 
+/* --------------------------------------------------------------------------
+   The standings trust decision.
+
+   Structural validity and applicability are two different questions, and
+   keeping them in two variables invited exactly one bug: the season was
+   resolved from the structural answer while the standings themselves waited
+   on the applicability answer. A payload could then be refused as a table and
+   still relabel the competition it described.
+
+   Collapsing both into one decision makes that divergence unrepresentable.
+   There is a single `trusted`, and the season rides with it.
+-------------------------------------------------------------------------- */
+
+/** Schema-required placeholder for a competition whose season is not yet known. */
+export const UNKNOWN_SEASON = 'unknown'
+
+export type StandingsDecision =
+  | { trusted: true; plan: StandingsWritePlan; season: string }
+  | { trusted: false; reason: string }
+
+export function decideStandings(
+  payload: StandingsPayload | null | undefined,
+  competitionCode: string,
+  stored: ReadonlyMap<number, StandingColumns>,
+): StandingsDecision {
+  const check = readTotalStandings(payload, competitionCode)
+
+  if (!check.ok) {
+    return { trusted: false, reason: `standings unavailable (${check.reason})` }
+  }
+
+  const transition = planStandingsTransition(check.rows, stored)
+
+  if (!transition.ok) {
+    return { trusted: false, reason: `standings ${transition.reason}` }
+  }
+
+  return {
+    trusted: true,
+    plan: transition.plan,
+    season: seasonLabel(payload?.season?.startDate, payload?.season?.endDate),
+  }
+}
+
+/**
+ * Season may only advance from a standings payload trusted end to end.
+ *
+ * The season is a claim about which edition of a competition the stored table
+ * describes. Advancing it from a payload we declined to apply would label a
+ * stale table with a new season -- a competition reading 2027/28 over a
+ * 2026/27 table, which is worse than either value alone because it is
+ * internally inconsistent and nothing downstream can detect it.
+ *
+ * The competition's other metadata comes from the tracked manifest rather
+ * than the feed, so it stays maintained regardless. Only the season is gated.
+ */
+export function resolveSeason(
+  decision: StandingsDecision,
+  storedSeason: string | null,
+): string {
+  return decision.trusted ? decision.season : (storedSeason ?? UNKNOWN_SEASON)
+}
+
 export function planStandingsTransition(
   incoming: readonly NormalisedStanding[],
   stored: ReadonlyMap<number, StandingColumns>,

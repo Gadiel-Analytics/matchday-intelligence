@@ -386,7 +386,38 @@ The current ruleset does not require PRs.
 For material API, D1, ingestion, security or infrastructure changes, prefer a
 branch and review even though GitHub does not mechanically require one.
 
-## 10. Decision record
+## 10. Commit attribution policy
+
+The sole human Git author of this repository is
+
+```text
+Gadiel Guadarrama <gadiel.mario@gmail.com>
+```
+
+unless Gadiel explicitly authorises another human contributor. Commits created
+locally use that identity as both author and committer.
+
+Merge commits created by the hosting platform are the one exception to the
+committer half of that rule. GitHub records `web-flow` as the committer when a
+pull request is merged from the web interface, and other platforms behave
+equivalently. That field records which system performed the merge, not that
+anyone else contributed, so a platform or bot committer never amounts to
+contributor authorship and does not conflict with this policy.
+
+Commit messages carry no co-author trailers, session URLs, generated-by
+metadata, assistant attribution or tool attribution of any kind. Authorship
+records who is accountable for a change, and that does not vary with the tools
+used to produce it — an editor, a linter, a code generator or an assistant are
+all instruments, and none of them are contributors. Automated assistance
+therefore leaves authorship attribution unchanged.
+
+Before committing locally, confirm:
+
+1. `git config user.name` is `Gadiel Guadarrama`;
+2. `git config user.email` is `gadiel.mario@gmail.com`;
+3. the final message contains no secondary author or tool trailer.
+
+## 11. Decision record
 
 `src/sections/DecisionLog.tsx` is part of the project's engineering record, not
 only product copy.
@@ -405,7 +436,7 @@ Each decision includes a `revisit when` condition.
 When a future change intentionally reverses one of these choices, update the
 decision record instead of silently changing the architecture.
 
-## 11. Historical production lessons
+## 12. Historical production lessons
 
 The predecessor system produced several incidents that shaped V1:
 
@@ -432,7 +463,7 @@ Always verify Wrangler reports the expected Worker:
 
 `matchday-api`
 
-## 12. Historical predecessor
+## 13. Historical predecessor
 
 Matchday succeeded a World Cup production application used to create the frozen
 archive.
@@ -452,7 +483,7 @@ At V1 close:
 
 Do not re-enable the predecessor as part of normal Matchday maintenance.
 
-## 13. Starting the next phase
+## 14. Starting the next phase
 
 Before implementing V1.1 or V2:
 
@@ -480,7 +511,7 @@ Before implementing V1.1 or V2:
 The repository and current cloud configuration should be sufficient to resume
 work without recovering old conversations.
 
-## 14. Definition of done for future work
+## 15. Definition of done for future work
 
 A production-affecting change is complete only when:
 

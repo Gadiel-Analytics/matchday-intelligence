@@ -16,13 +16,18 @@ export interface SyncEnv {
 }
 
 /**
- * Mirrors worker/wrangler.toml:
- * - 13 match-window hours × 12 runs/hour
+ * Mirrors worker/wrangler.toml. The site publishes this figure, so it must
+ * never describe a schedule the Worker is not actually running.
+ *
+ * TEMPORARY CONTAINMENT (M1): the match window is hourly, not every 5 minutes.
+ * - 13 match-window hours × 1 run/hour
  * - 6 overnight runs
+ * Restore `13 * 12 + 6` when wrangler.toml goes back to the 5-minute cron.
+ *
  * Each competition consumes standings + matches: two feed requests.
  */
 const REQUESTS_PER_COMPETITION = 2
-const SCHEDULED_RUNS_PER_DAY = 13 * 12 + 6
+const SCHEDULED_RUNS_PER_DAY = 13 * 1 + 6
 const EXPECTED_REQUESTS_PER_DAY =
   SCHEDULED_RUNS_PER_DAY * ROTATION_SIZE * REQUESTS_PER_COMPETITION
 

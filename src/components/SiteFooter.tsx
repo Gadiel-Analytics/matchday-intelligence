@@ -46,7 +46,9 @@ export function SiteFooter() {
             Match data: football-data.org (free tier) · Infrastructure: Cloudflare Pages,
             Workers, D1
           </p>
-          <p className="ga-machine text-[11px] text-ga-text-muted">MIT licensed</p>
+          <p className="ga-machine text-[11px] text-ga-text-muted">
+            © 2026 Gadiel Guadarrama · All rights reserved.
+          </p>
         </div>
       </div>
     </footer>

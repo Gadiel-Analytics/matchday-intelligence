@@ -9,7 +9,9 @@ import {
   planStandingWrites,
   planStandingsTransition,
   decideStandings,
+  providerSeason,
   resolveSeason,
+  seasonLabel,
   UNKNOWN_SEASON,
   matchColumns,
   standingColumns,
@@ -404,8 +406,8 @@ describe('season trust', () => {
       feedStanding({ position: index + 1, team: { id: from + index } }),
     )
 
-  const payload = (rows: FdStanding[], startDate: string, endDate: string) => ({
-    season: { startDate, endDate },
+  const payload = (rows: FdStanding[], startDate?: string, endDate?: string) => ({
+    ...(startDate ? { season: { startDate, endDate } } : {}),
     standings: [{ type: 'TOTAL', table: rows }],
   })
 
@@ -451,6 +453,51 @@ describe('season trust', () => {
 
     expect(decision.trusted).toBe(false)
     expect(resolveSeason(decision, null)).toBe(UNKNOWN_SEASON)
+  })
+
+  // Absence of season metadata is not a statement that the season is unknown.
+  it('keeps a known stored season when a trusted table carries no season metadata', () => {
+    const decision = decideStandings(payload(teams(20)), 'PL', stored20())
+
+    expect(decision.trusted).toBe(true)
+    if (decision.trusted) expect(decision.season).toBeNull()
+    expect(resolveSeason(decision, '2026/27')).toBe('2026/27')
+  })
+
+  it('falls back to the sentinel only when nothing has ever been established', () => {
+    const decision = decideStandings(payload(teams(20)), 'PL', new Map())
+
+    expect(decision.trusted).toBe(true)
+    expect(resolveSeason(decision, null)).toBe(UNKNOWN_SEASON)
+  })
+
+  it('writes no season column when a trusted table omits the metadata', () => {
+    const columns = {
+      name: 'Premier League',
+      short_name: 'Premier League',
+      area: 'England',
+      shape: 'LEAGUE',
+      season: '2026/27',
+    }
+
+    const decision = decideStandings(payload(teams(20)), 'PL', stored20())
+    const season = resolveSeason(decision, columns.season)
+
+    expect(planCompetitionWrite({ ...columns, season }, columns)).toEqual({
+      kind: 'unchanged',
+    })
+  })
+
+  it('separates "the feed said nothing" from "the feed said unknown"', () => {
+    // seasonLabel is a formatter and answers the sentinel for missing input.
+    // providerSeason is an epistemic reading and answers null. Collapsing the
+    // two is what let a trusted table erase a known season.
+    expect(seasonLabel(undefined, undefined)).toBe(UNKNOWN_SEASON)
+    expect(providerSeason({ standings: [] })).toBeNull()
+    expect(providerSeason(undefined)).toBeNull()
+    expect(providerSeason({ season: { startDate: '2027-08-14', endDate: '2028-05-24' } })).toBe(
+      '2027/28',
+    )
   })
 
   it('leaves the stored season untouched in the competition write plan', () => {

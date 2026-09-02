@@ -733,11 +733,32 @@ export type StandingsTransition =
    There is a single `trusted`, and the season rides with it.
 -------------------------------------------------------------------------- */
 
-/** Schema-required placeholder for a competition whose season is not yet known. */
+/**
+ * Schema-required placeholder for a competition whose season has never been
+ * established. It is a storage fallback, never a statement the feed made.
+ */
 export const UNKNOWN_SEASON = 'unknown'
 
+/**
+ * The feed's season label, or null when the feed did not supply one.
+ *
+ * `seasonLabel` answers a formatting question and returns the sentinel for
+ * missing input, which makes "the provider said unknown" and "the provider
+ * said nothing" the same string. They are not the same fact: the first is
+ * authoritative and the second is an absence, and only the absence must leave
+ * a known stored season alone. Null carries that distinction; the sentinel
+ * cannot.
+ */
+export function providerSeason(payload: StandingsPayload | null | undefined): string | null {
+  const startDate = payload?.season?.startDate
+
+  if (!startDate) return null
+
+  return seasonLabel(startDate, payload?.season?.endDate)
+}
+
 export type StandingsDecision =
-  | { trusted: true; plan: StandingsWritePlan; season: string }
+  | { trusted: true; plan: StandingsWritePlan; season: string | null }
   | { trusted: false; reason: string }
 
 export function decideStandings(
@@ -760,18 +781,23 @@ export function decideStandings(
   return {
     trusted: true,
     plan: transition.plan,
-    season: seasonLabel(payload?.season?.startDate, payload?.season?.endDate),
+    season: providerSeason(payload),
   }
 }
 
 /**
- * Season may only advance from a standings payload trusted end to end.
+ * Season may only advance from a standings payload trusted end to end, and
+ * only when that payload actually carried one.
  *
  * The season is a claim about which edition of a competition the stored table
  * describes. Advancing it from a payload we declined to apply would label a
  * stale table with a new season -- a competition reading 2027/28 over a
  * 2026/27 table, which is worse than either value alone because it is
  * internally inconsistent and nothing downstream can detect it.
+ *
+ * Trust and availability are separate conditions. A trusted table that simply
+ * came without season metadata must not overwrite a known season with the
+ * sentinel: forgetting is a change, and nothing here learned anything.
  *
  * The competition's other metadata comes from the tracked manifest rather
  * than the feed, so it stays maintained regardless. Only the season is gated.
@@ -780,7 +806,9 @@ export function resolveSeason(
   decision: StandingsDecision,
   storedSeason: string | null,
 ): string {
-  return decision.trusted ? decision.season : (storedSeason ?? UNKNOWN_SEASON)
+  if (decision.trusted && decision.season !== null) return decision.season
+
+  return storedSeason ?? UNKNOWN_SEASON
 }
 
 export function planStandingsTransition(

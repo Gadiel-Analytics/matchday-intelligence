@@ -6,11 +6,10 @@ import {
   fetchMatches,
   fetchStandings,
   normaliseMatch,
+  decideStandings,
   planCompetitionWrite,
   planMatchWrites,
-  planStandingsTransition,
-  readTotalStandings,
-  seasonLabel,
+  resolveSeason,
   selectRotation,
   selectScope,
   type CompetitionColumns,
@@ -116,14 +115,15 @@ async function ingestCompetition(
   /* ---- standings ------------------------------------------------------- */
 
   const standingsPayload = await fetchStandings(competition.code, apiKey)
-  const check = readTotalStandings(standingsPayload, competition.code)
   const storedCompetition = await readCompetition(env.DB, competition.code)
+  const storedStandings = await readStandings(env.DB, competition.code)
 
-  // Season comes from the standings payload. When that payload is unusable we
-  // keep whatever we already recorded rather than inventing a label.
-  const season = check.ok
-    ? seasonLabel(standingsPayload.season?.startDate, standingsPayload.season?.endDate)
-    : (storedCompetition?.season ?? 'unknown')
+  // One decision covers both questions the payload has to answer: is it
+  // structurally sound, and can it be applied to what we hold. Season rides
+  // with that decision, so a table we refuse cannot relabel the competition
+  // it failed to describe.
+  const decision = decideStandings(standingsPayload, competition.code, storedStandings)
+  const season = resolveSeason(decision, storedCompetition?.season ?? null)
 
   /* ---- competition metadata -------------------------------------------- */
 
@@ -174,91 +174,81 @@ async function ingestCompetition(
     counts.competitionsWritten += 1
   }
 
-  if (!check.ok) {
-    // Never interpret "the provider returned nothing" as "the league is empty".
+  if (!decision.trusted) {
+    // Covers both refusals: a payload that made no structural sense, and one
+    // that made sense but described fewer teams than we hold. Either way the
+    // stored table stands and the reason is recorded.
     summary.errors.push(
-      `${competition.code}: standings unavailable (${check.reason}); stored standings left untouched`,
+      `${competition.code}: ${decision.reason}; stored standings left untouched`,
     )
   } else {
-    const storedStandings = await readStandings(env.DB, competition.code)
-    const transition = planStandingsTransition(check.rows, storedStandings)
+    const plan = decision.plan
 
-    if (!transition.ok) {
-      // Structurally valid, but it describes fewer teams than we hold. Keep
-      // what is stored and surface why, rather than deleting on a reading we
-      // cannot justify.
-      summary.errors.push(
-        `${competition.code}: standings ${transition.reason}; stored standings left untouched`,
+    for (const row of plan.inserts) {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO standings (
+             competition_code, position, team_id, team_name, team_crest,
+             played, won, drawn, lost, goals_for, goals_against,
+             goal_difference, points, form, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(competition_code, team_id) DO UPDATE SET
+             position = excluded.position,
+             team_name = excluded.team_name,
+             team_crest = excluded.team_crest,
+             played = excluded.played,
+             won = excluded.won,
+             drawn = excluded.drawn,
+             lost = excluded.lost,
+             goals_for = excluded.goals_for,
+             goals_against = excluded.goals_against,
+             goal_difference = excluded.goal_difference,
+             points = excluded.points,
+             form = excluded.form,
+             updated_at = excluded.updated_at`,
+        ).bind(
+          competition.code,
+          row.position,
+          row.team_id,
+          row.team_name,
+          row.team_crest,
+          row.played,
+          row.won,
+          row.drawn,
+          row.lost,
+          row.goals_for,
+          row.goals_against,
+          row.goal_difference,
+          row.points,
+          row.form,
+          stamp,
+        ),
       )
-    } else {
-      const plan = transition.plan
-
-      for (const row of plan.inserts) {
-        statements.push(
-          env.DB.prepare(
-            `INSERT INTO standings (
-               competition_code, position, team_id, team_name, team_crest,
-               played, won, drawn, lost, goals_for, goals_against,
-               goal_difference, points, form, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(competition_code, team_id) DO UPDATE SET
-               position = excluded.position,
-               team_name = excluded.team_name,
-               team_crest = excluded.team_crest,
-               played = excluded.played,
-               won = excluded.won,
-               drawn = excluded.drawn,
-               lost = excluded.lost,
-               goals_for = excluded.goals_for,
-               goals_against = excluded.goals_against,
-               goal_difference = excluded.goal_difference,
-               points = excluded.points,
-               form = excluded.form,
-               updated_at = excluded.updated_at`,
-          ).bind(
-            competition.code,
-            row.position,
-            row.team_id,
-            row.team_name,
-            row.team_crest,
-            row.played,
-            row.won,
-            row.drawn,
-            row.lost,
-            row.goals_for,
-            row.goals_against,
-            row.goal_difference,
-            row.points,
-            row.form,
-            stamp,
-          ),
-        )
-      }
-
-      for (const row of plan.updates) {
-        const { sql, values } = assignments(row.changed)
-        statements.push(
-          env.DB.prepare(
-            `UPDATE standings SET ${sql}, updated_at = ?
-              WHERE competition_code = ? AND team_id = ?`,
-          ).bind(...values, stamp, competition.code, row.team_id),
-        )
-      }
-
-      for (const teamId of plan.removals) {
-        statements.push(
-          env.DB.prepare(
-            `DELETE FROM standings WHERE competition_code = ? AND team_id = ?`,
-          ).bind(competition.code, teamId),
-        )
-      }
-
-      standingsCompared += plan.compared
-      counts.standingsInserted += plan.inserts.length
-      counts.standingsUpdated += plan.updates.length
-      counts.standingsRemoved += plan.removals.length
-      counts.standingsUnchanged += plan.unchanged
     }
+
+    for (const row of plan.updates) {
+      const { sql, values } = assignments(row.changed)
+      statements.push(
+        env.DB.prepare(
+          `UPDATE standings SET ${sql}, updated_at = ?
+            WHERE competition_code = ? AND team_id = ?`,
+        ).bind(...values, stamp, competition.code, row.team_id),
+      )
+    }
+
+    for (const teamId of plan.removals) {
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM standings WHERE competition_code = ? AND team_id = ?`,
+        ).bind(competition.code, teamId),
+      )
+    }
+
+    standingsCompared += plan.compared
+    counts.standingsInserted += plan.inserts.length
+    counts.standingsUpdated += plan.updates.length
+    counts.standingsRemoved += plan.removals.length
+    counts.standingsUnchanged += plan.unchanged
   }
 
   /* ---- matches --------------------------------------------------------- */

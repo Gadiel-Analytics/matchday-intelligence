@@ -8,6 +8,9 @@ import {
   planMatchWrites,
   planStandingWrites,
   planStandingsTransition,
+  decideStandings,
+  resolveSeason,
+  UNKNOWN_SEASON,
   matchColumns,
   standingColumns,
   readTotalStandings,
@@ -388,6 +391,104 @@ describe('planCompetitionWrite', () => {
     const plan = planCompetitionWrite(columns, { ...columns, season: '2025/26' })
 
     expect(plan).toEqual({ kind: 'update', changed: { season: '2026/27' } })
+  })
+})
+
+/* -------------------------------------------------------------------------
+   Season trust — season may only advance from standings trusted end to end
+------------------------------------------------------------------------- */
+
+describe('season trust', () => {
+  const teams = (count: number, from = 100) =>
+    Array.from({ length: count }, (_, index) =>
+      feedStanding({ position: index + 1, team: { id: from + index } }),
+    )
+
+  const payload = (rows: FdStanding[], startDate: string, endDate: string) => ({
+    season: { startDate, endDate },
+    standings: [{ type: 'TOTAL', table: rows }],
+  })
+
+  const NEW_SEASON = ['2027-08-14', '2028-05-24'] as const
+  const stored20 = () =>
+    storedStandingsFrom(
+      teams(20).map((row) => standing({ position: row.position, team: row.team })),
+    )
+
+  it('refuses to advance the season when the new table has lost a team', () => {
+    // The failure this guard exists for: a rollover payload that is
+    // structurally perfect but covers 19 of 20 teams. Refusing the table
+    // while accepting its season label would leave the competition reading
+    // 2027/28 over a stale 2026/27 table.
+    const decision = decideStandings(payload(teams(19), ...NEW_SEASON), 'PL', stored20())
+
+    expect(decision.trusted).toBe(false)
+    expect(resolveSeason(decision, '2026/27')).toBe('2026/27')
+    expect(decision).not.toHaveProperty('season')
+  })
+
+  it('advances the season when the new table keeps its cardinality', () => {
+    const decision = decideStandings(payload(teams(20), ...NEW_SEASON), 'PL', stored20())
+
+    expect(decision.trusted).toBe(true)
+    if (decision.trusted) expect(decision.season).toBe('2027/28')
+    expect(resolveSeason(decision, '2026/27')).toBe('2027/28')
+  })
+
+  it('refuses to advance the season from a structurally invalid payload', () => {
+    const broken = teams(20)
+    broken[3] = { ...feedStanding(), team: {} } as FdStanding
+
+    const decision = decideStandings(payload(broken, ...NEW_SEASON), 'PL', stored20())
+
+    expect(decision.trusted).toBe(false)
+    expect(resolveSeason(decision, '2026/27')).toBe('2026/27')
+  })
+
+  it('bootstraps a brand-new competition with the sentinel when standings are unusable', () => {
+    // The parent row still has to exist: matches carry a foreign key onto it.
+    const decision = decideStandings(payload([], ...NEW_SEASON), 'PL', new Map())
+
+    expect(decision.trusted).toBe(false)
+    expect(resolveSeason(decision, null)).toBe(UNKNOWN_SEASON)
+  })
+
+  it('leaves the stored season untouched in the competition write plan', () => {
+    const columns = {
+      name: 'Premier League',
+      short_name: 'Premier League',
+      area: 'England',
+      shape: 'LEAGUE',
+      season: '2026/27',
+    }
+
+    const decision = decideStandings(payload(teams(19), ...NEW_SEASON), 'PL', stored20())
+    const season = resolveSeason(decision, columns.season)
+
+    // No season column reaches the UPDATE, so nothing can relabel the table.
+    expect(planCompetitionWrite({ ...columns, season }, columns)).toEqual({
+      kind: 'unchanged',
+    })
+  })
+
+  it('still maintains the manifest metadata while the season is withheld', () => {
+    const stored = {
+      name: 'Premier Leage',
+      short_name: 'Premier League',
+      area: 'England',
+      shape: 'LEAGUE',
+      season: '2026/27',
+    }
+
+    const decision = decideStandings(payload(teams(19), ...NEW_SEASON), 'PL', stored20())
+    const season = resolveSeason(decision, stored.season)
+
+    const plan = planCompetitionWrite(
+      { ...stored, name: 'Premier League', season },
+      stored,
+    )
+
+    expect(plan).toEqual({ kind: 'update', changed: { name: 'Premier League' } })
   })
 })
 

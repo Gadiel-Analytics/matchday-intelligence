@@ -77,9 +77,22 @@ export interface FdStanding {
 }
 
 /**
- * Counts of what was actually mutated. Logged, not persisted: recording these
- * in D1 needs a schema change, and the core remediation deliberately ships
- * without one so it stays trivially revertible. See docs/OPERATIONS.md.
+ * Counts of what was actually mutated.
+ *
+ * Accumulated per competition and folded into the run summary ONLY after that
+ * competition's statements have been applied, so a run that plans writes and
+ * then fails before executing them reports nothing. Planned is not written,
+ * and telemetry that conflates the two would mis-calibrate the M5 thresholds
+ * it exists to inform.
+ *
+ * Caveat, stated rather than engineered away: statements are applied in
+ * batches, so a competition that throws midway may have applied an earlier
+ * batch whose counts are then not folded. Counts are authoritative for a
+ * competition that completed, and under-report one that errored. Exact
+ * partial-batch accounting is not worth the machinery here.
+ *
+ * Logged, not persisted: recording these in D1 needs a schema change, and the
+ * core remediation deliberately ships without one so it stays revertible.
  */
 export interface WriteCounts {
   matchesInserted: number
@@ -90,6 +103,15 @@ export interface WriteCounts {
   standingsRemoved: number
   standingsUnchanged: number
   competitionsWritten: number
+}
+
+/** Folds a completed competition's counts into the run total. */
+export function addWriteCounts(target: WriteCounts, source: WriteCounts): WriteCounts {
+  for (const key of Object.keys(target) as (keyof WriteCounts)[]) {
+    target[key] += source[key]
+  }
+
+  return target
 }
 
 export function emptyWriteCounts(): WriteCounts {
@@ -642,17 +664,76 @@ export function readTotalStandings(
     return { ok: false, reason: 'TOTAL standings table was not an array' }
   }
 
-  if (total.table.length === 0) {
-    return { ok: false, reason: 'TOTAL standings table was empty' }
+  // Every row or none.
+  //
+  // Filtering malformed rows away would hand the caller a table that looks
+  // authoritative and is quietly one team short -- and a short table reads
+  // downstream as "that team is no longer in this competition", which is a
+  // deletion. A structurally broken payload is not a partial truth to salvage.
+  const rows: NormalisedStanding[] = []
+
+  for (const raw of total.table) {
+    const row = normaliseStanding(raw, competitionCode)
+
+    if (!row) {
+      return { ok: false, reason: 'a TOTAL standings row carried no team id' }
+    }
+
+    rows.push(row)
   }
 
-  const rows = total.table
-    .map((row) => normaliseStanding(row, competitionCode))
-    .filter((row): row is NormalisedStanding => row !== null)
-
+  // The one zero-row rejection. An empty table reaches here with an empty
+  // rows array and is refused exactly once: a second length check earlier
+  // would be unreachable in practice and impossible to mutation-test.
   if (rows.length === 0) {
-    return { ok: false, reason: 'no standings row carried a team id' }
+    return { ok: false, reason: 'TOTAL standings table listed no teams' }
+  }
+
+  // A duplicate makes a table that counts as full while covering fewer teams
+  // than it appears to, which is the same structural incompleteness by a
+  // different route.
+  const teamIds = new Set(rows.map((row) => row.teamId))
+
+  if (teamIds.size !== rows.length) {
+    return { ok: false, reason: 'TOTAL standings table listed a team more than once' }
   }
 
   return { ok: true, rows }
+}
+
+/* --------------------------------------------------------------------------
+   Standings transition guard.
+
+   A payload can be structurally perfect and still describe fewer teams than
+   we hold. There is no honest way to tell a genuinely shrunken competition
+   from a truncated response, so the safe reading is the conservative one:
+   refuse the transition, keep what is stored, and say so.
+
+   Deliberately a cardinality rule rather than a tuned percentage. Equal
+   cardinality with different membership -- promotion and relegation -- still
+   flows through as selective inserts and removals; only an unexplained net
+   contraction is refused. Stale standings with a visible error beat a
+   destructive interpretation of a partial provider response.
+-------------------------------------------------------------------------- */
+
+export type StandingsTransition =
+  | { ok: true; plan: StandingsWritePlan }
+  | { ok: false; reason: string }
+
+export function planStandingsTransition(
+  incoming: readonly NormalisedStanding[],
+  stored: ReadonlyMap<number, StandingColumns>,
+): StandingsTransition {
+  const incomingTeams = new Set(incoming.map((row) => row.teamId))
+
+  if (stored.size > 0 && incomingTeams.size < stored.size) {
+    return {
+      ok: false,
+      reason:
+        `feed listed ${incomingTeams.size} teams against ${stored.size} stored; ` +
+        'unexplained contraction not applied',
+    }
+  }
+
+  return { ok: true, plan: planStandingWrites(incoming, stored) }
 }

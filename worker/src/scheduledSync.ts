@@ -1,12 +1,22 @@
 import {
   ROTATION_SIZE,
   TRACKED_COMPETITIONS,
+  emptyWriteCounts,
   fetchMatches,
   fetchStandings,
   normaliseMatch,
-  normaliseStanding,
+  planCompetitionWrite,
+  planMatchWrites,
+  planStandingWrites,
+  readTotalStandings,
   seasonLabel,
   selectRotation,
+  selectScope,
+  type CompetitionColumns,
+  type IngestScope,
+  type MatchColumns,
+  type NormalisedMatch,
+  type StandingColumns,
   type SyncSummary,
 } from './sync'
 
@@ -31,6 +41,9 @@ const SCHEDULED_RUNS_PER_DAY = 13 * 1 + 6
 const EXPECTED_REQUESTS_PER_DAY =
   SCHEDULED_RUNS_PER_DAY * ROTATION_SIZE * REQUESTS_PER_COMPETITION
 
+/** D1 batches are one round trip; 40 keeps a batch well inside every limit. */
+const BATCH_SIZE = 40
+
 /**
  * One ingestion pass.
  *
@@ -38,27 +51,32 @@ const EXPECTED_REQUESTS_PER_DAY =
  * and no record of why. Errors are collected into the summary and written to
  * sync_status, so the failure is visible on the page rather than only in logs.
  */
-export async function runScheduledSync(env: SyncEnv): Promise<SyncSummary> {
+export async function runScheduledSync(
+  env: SyncEnv,
+  now: Date = new Date(),
+): Promise<SyncSummary> {
   const summary: SyncSummary = {
     competitions: [],
     matchesIngested: 0,
     standingsIngested: 0,
     unresolved: 0,
     errors: [],
+    writes: emptyWriteCounts(),
   }
 
   if (!env.FOOTBALL_DATA_API_KEY) {
     summary.errors.push('FOOTBALL_DATA_API_KEY is not set; skipping run.')
-    await recordStatus(env.DB, summary).catch(() => undefined)
+    await recordStatus(env.DB, summary, now).catch(() => undefined)
     return summary
   }
 
+  const scope = selectScope(now)
   const runIndex = await nextRunIndex(env.DB)
   const rotation = selectRotation(runIndex)
 
   for (const competition of rotation) {
     try {
-      await ingestCompetition(env, competition, summary)
+      await ingestCompetition(env, competition, scope, summary, now)
       summary.competitions.push(competition.code)
     } catch (error) {
       summary.errors.push(
@@ -67,7 +85,7 @@ export async function runScheduledSync(env: SyncEnv): Promise<SyncSummary> {
     }
   }
 
-  await recordStatus(env.DB, summary, runIndex + 1).catch((error) => {
+  await recordStatus(env.DB, summary, now, runIndex + 1).catch((error) => {
     console.error('Failed to record sync_status', error)
   })
 
@@ -77,138 +95,321 @@ export async function runScheduledSync(env: SyncEnv): Promise<SyncSummary> {
 async function ingestCompetition(
   env: SyncEnv,
   competition: (typeof TRACKED_COMPETITIONS)[number],
+  scope: IngestScope,
   summary: SyncSummary,
+  now: Date,
 ): Promise<void> {
   const apiKey = env.FOOTBALL_DATA_API_KEY as string
-  const now = new Date().toISOString()
+  const stamp = now.toISOString()
+  const statements: D1PreparedStatement[] = []
+
+  /* ---- standings ------------------------------------------------------- */
 
   const standingsPayload = await fetchStandings(competition.code, apiKey)
-  const season = seasonLabel(
-    standingsPayload.season?.startDate,
-    standingsPayload.season?.endDate,
-  )
+  const check = readTotalStandings(standingsPayload, competition.code)
+  const storedCompetition = await readCompetition(env.DB, competition.code)
 
-  await env.DB.prepare(
-    `INSERT INTO competitions (code, name, short_name, area, shape, season, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(code) DO UPDATE SET
-       name = excluded.name,
-       short_name = excluded.short_name,
-       area = excluded.area,
-       shape = excluded.shape,
-       season = excluded.season,
-       updated_at = excluded.updated_at`,
-  )
-    .bind(
-      competition.code,
-      competition.name,
-      competition.shortName,
-      competition.area,
-      competition.shape,
+  // Season comes from the standings payload. When that payload is unusable we
+  // keep whatever we already recorded rather than inventing a label.
+  const season = check.ok
+    ? seasonLabel(standingsPayload.season?.startDate, standingsPayload.season?.endDate)
+    : (storedCompetition?.season ?? 'unknown')
+
+  /* ---- competition metadata -------------------------------------------- */
+
+  // Written before matches regardless of the standings outcome: matches carry
+  // a foreign key onto this row, so it has to exist even on a run where the
+  // standings payload was rejected.
+  const competitionPlan = planCompetitionWrite(
+    {
+      name: competition.name,
+      short_name: competition.shortName,
+      area: competition.area,
+      shape: competition.shape,
       season,
-      now,
+    },
+    storedCompetition,
+  )
+
+  if (competitionPlan.kind === 'insert') {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO competitions (code, name, short_name, area, shape, season, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(code) DO UPDATE SET
+           name = excluded.name,
+           short_name = excluded.short_name,
+           area = excluded.area,
+           shape = excluded.shape,
+           season = excluded.season,
+           updated_at = excluded.updated_at`,
+      ).bind(
+        competition.code,
+        competitionPlan.columns.name,
+        competitionPlan.columns.short_name,
+        competitionPlan.columns.area,
+        competitionPlan.columns.shape,
+        competitionPlan.columns.season,
+        stamp,
+      ),
     )
-    .run()
+    summary.writes.competitionsWritten += 1
+  } else if (competitionPlan.kind === 'update') {
+    const { sql, values } = assignments(competitionPlan.changed)
+    statements.push(
+      env.DB.prepare(
+        `UPDATE competitions SET ${sql}, updated_at = ? WHERE code = ?`,
+      ).bind(...values, stamp, competition.code),
+    )
+    summary.writes.competitionsWritten += 1
+  }
 
-  // Standings are a full replacement: the feed's table is authoritative and a
-  // partial merge could leave a relegated or withdrawn team stranded in ours.
-  const table =
-    standingsPayload.standings?.find((entry) => entry.type === 'TOTAL')?.table ?? []
+  if (!check.ok) {
+    // Never interpret "the provider returned nothing" as "the league is empty".
+    summary.errors.push(
+      `${competition.code}: standings unavailable (${check.reason}); stored standings left untouched`,
+    )
+  } else {
+    const storedStandings = await readStandings(env.DB, competition.code)
+    const plan = planStandingWrites(check.rows, storedStandings)
 
-  const standingRows = table
-    .map((row) => normaliseStanding(row, competition.code))
-    .filter((row): row is NonNullable<typeof row> => row !== null)
-
-  await env.DB.prepare(`DELETE FROM standings WHERE competition_code = ?`)
-    .bind(competition.code)
-    .run()
-
-  if (standingRows.length > 0) {
-    await env.DB.batch(
-      standingRows.map((row) =>
+    for (const row of plan.inserts) {
+      statements.push(
         env.DB.prepare(
           `INSERT INTO standings (
              competition_code, position, team_id, team_name, team_crest,
              played, won, drawn, lost, goals_for, goals_against,
              goal_difference, points, form, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(competition_code, team_id) DO UPDATE SET
+             position = excluded.position,
+             team_name = excluded.team_name,
+             team_crest = excluded.team_crest,
+             played = excluded.played,
+             won = excluded.won,
+             drawn = excluded.drawn,
+             lost = excluded.lost,
+             goals_for = excluded.goals_for,
+             goals_against = excluded.goals_against,
+             goal_difference = excluded.goal_difference,
+             points = excluded.points,
+             form = excluded.form,
+             updated_at = excluded.updated_at`,
         ).bind(
-          row.competitionCode,
+          competition.code,
           row.position,
-          row.teamId,
-          row.teamName,
-          row.teamCrest,
+          row.team_id,
+          row.team_name,
+          row.team_crest,
           row.played,
           row.won,
           row.drawn,
           row.lost,
-          row.goalsFor,
-          row.goalsAgainst,
-          row.goalDifference,
+          row.goals_for,
+          row.goals_against,
+          row.goal_difference,
           row.points,
           row.form,
-          now,
+          stamp,
         ),
-      ),
-    )
-    summary.standingsIngested += standingRows.length
+      )
+    }
+
+    for (const row of plan.updates) {
+      const { sql, values } = assignments(row.changed)
+      statements.push(
+        env.DB.prepare(
+          `UPDATE standings SET ${sql}, updated_at = ?
+            WHERE competition_code = ? AND team_id = ?`,
+        ).bind(...values, stamp, competition.code, row.team_id),
+      )
+    }
+
+    for (const teamId of plan.removals) {
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM standings WHERE competition_code = ? AND team_id = ?`,
+        ).bind(competition.code, teamId),
+      )
+    }
+
+    summary.standingsIngested += plan.compared
+    summary.writes.standingsInserted += plan.inserts.length
+    summary.writes.standingsUpdated += plan.updates.length
+    summary.writes.standingsRemoved += plan.removals.length
+    summary.writes.standingsUnchanged += plan.unchanged
   }
 
-  const matchesPayload = await fetchMatches(competition.code, apiKey)
+  /* ---- matches --------------------------------------------------------- */
+
+  const matchesPayload = await fetchMatches(competition.code, apiKey, scope)
   const feedMatches = matchesPayload.matches ?? []
 
-  const matchRows = feedMatches.map((match) => normaliseMatch(match, competition.code))
-  summary.unresolved += matchRows.filter((row) => row === null).length
+  const normalised = feedMatches.map((match) => normaliseMatch(match, competition.code))
+  summary.unresolved += normalised.filter((row) => row === null).length
 
-  const usable = matchRows.filter((row): row is NonNullable<typeof row> => row !== null)
+  const usable = normalised.filter((row): row is NormalisedMatch => row !== null)
+  const storedMatches = await readMatches(env.DB, competition.code, scope)
+  const matchPlan = planMatchWrites(usable, storedMatches)
 
-  // Upsert keyed on the feed's own match id: reruns converge instead of
-  // duplicating, so the job is safe to retry at any point.
-  for (let index = 0; index < usable.length; index += 40) {
-    const chunk = usable.slice(index, index + 40)
-    await env.DB.batch(
-      chunk.map((row) =>
-        env.DB.prepare(
-          `INSERT INTO matches (
-             id, competition_code, matchday, stage, kickoff_utc, status,
-             home_team_id, home_team_name, home_team_crest,
-             away_team_id, away_team_name, away_team_crest,
-             home_score, away_score, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             matchday = excluded.matchday,
-             stage = excluded.stage,
-             kickoff_utc = excluded.kickoff_utc,
-             status = excluded.status,
-             home_team_name = excluded.home_team_name,
-             home_team_crest = excluded.home_team_crest,
-             away_team_name = excluded.away_team_name,
-             away_team_crest = excluded.away_team_crest,
-             home_score = excluded.home_score,
-             away_score = excluded.away_score,
-             updated_at = excluded.updated_at`,
-        ).bind(
-          row.id,
-          row.competitionCode,
-          row.matchday,
-          row.stage,
-          row.kickoffUtc,
-          row.status,
-          row.homeTeamId,
-          row.homeTeamName,
-          row.homeTeamCrest,
-          row.awayTeamId,
-          row.awayTeamName,
-          row.awayTeamCrest,
-          row.homeScore,
-          row.awayScore,
-          now,
-        ),
+  for (const row of matchPlan.inserts) {
+    // Still an upsert, not a bare INSERT. In window mode the stored set is
+    // read for the same window, so a fixture rescheduled INTO the window
+    // looks new while its row already exists. Converging on conflict is what
+    // keeps reruns idempotent, which is a standing invariant.
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO matches (
+           id, competition_code, matchday, stage, kickoff_utc, status,
+           home_team_id, home_team_name, home_team_crest,
+           away_team_id, away_team_name, away_team_crest,
+           home_score, away_score, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           matchday = excluded.matchday,
+           stage = excluded.stage,
+           kickoff_utc = excluded.kickoff_utc,
+           status = excluded.status,
+           home_team_name = excluded.home_team_name,
+           home_team_crest = excluded.home_team_crest,
+           away_team_name = excluded.away_team_name,
+           away_team_crest = excluded.away_team_crest,
+           home_score = excluded.home_score,
+           away_score = excluded.away_score,
+           updated_at = excluded.updated_at`,
+      ).bind(
+        row.id,
+        row.competition_code,
+        row.matchday,
+        row.stage,
+        row.kickoff_utc,
+        row.status,
+        row.home_team_id,
+        row.home_team_name,
+        row.home_team_crest,
+        row.away_team_id,
+        row.away_team_name,
+        row.away_team_crest,
+        row.home_score,
+        row.away_score,
+        stamp,
       ),
     )
   }
 
-  summary.matchesIngested += usable.length
+  for (const row of matchPlan.updates) {
+    // Only the columns that differ. A `kickoff_utc` or `status` assignment
+    // rewrites its index whether or not the value moved, so leaving unchanged
+    // columns out of the SET list is what avoids the index write.
+    const { sql, values } = assignments(row.changed)
+    statements.push(
+      env.DB.prepare(`UPDATE matches SET ${sql}, updated_at = ? WHERE id = ?`).bind(
+        ...values,
+        stamp,
+        row.id,
+      ),
+    )
+  }
+
+  summary.matchesIngested += matchPlan.compared
+  summary.writes.matchesInserted += matchPlan.inserts.length
+  summary.writes.matchesUpdated += matchPlan.updates.length
+  summary.writes.matchesUnchanged += matchPlan.unchanged
+
+  /* ---- apply ----------------------------------------------------------- */
+
+  // On a quiet run this list is empty and the competition costs zero writes,
+  // which is the entire point of the change.
+  for (let index = 0; index < statements.length; index += BATCH_SIZE) {
+    await env.DB.batch(statements.slice(index, index + BATCH_SIZE))
+  }
+}
+
+/**
+ * Builds `col = ?` assignments for the columns that changed.
+ *
+ * The keys can only come from the column allow-lists in sync.ts, never from
+ * feed data, so there is no interpolation of untrusted text here.
+ */
+function assignments<T extends object>(changed: Partial<T>): {
+  sql: string
+  values: unknown[]
+} {
+  const keys = Object.keys(changed) as (keyof T & string)[]
+
+  return {
+    sql: keys.map((key) => `${key} = ?`).join(', '),
+    values: keys.map((key) => changed[key]),
+  }
+}
+
+async function readCompetition(
+  db: D1Database,
+  code: string,
+): Promise<CompetitionColumns | null> {
+  const row = await db
+    .prepare(
+      `SELECT name, short_name, area, shape, season FROM competitions WHERE code = ?`,
+    )
+    .bind(code)
+    .first<CompetitionColumns>()
+
+  return row ?? null
+}
+
+async function readStandings(
+  db: D1Database,
+  code: string,
+): Promise<Map<number, StandingColumns>> {
+  const result = await db
+    .prepare(
+      `SELECT team_id, position, team_name, team_crest, played, won, drawn, lost,
+              goals_for, goals_against, goal_difference, points, form
+         FROM standings WHERE competition_code = ?`,
+    )
+    .bind(code)
+    .all<StandingColumns & { team_id: number }>()
+
+  const stored = new Map<number, StandingColumns>()
+
+  for (const { team_id: teamId, ...columns } of result.results ?? []) {
+    stored.set(teamId, columns)
+  }
+
+  return stored
+}
+
+const MATCH_SELECT = `SELECT id, competition_code, matchday, stage, kickoff_utc, status,
+              home_team_id, home_team_name, home_team_crest,
+              away_team_id, away_team_name, away_team_crest,
+              home_score, away_score
+         FROM matches`
+
+async function readMatches(
+  db: D1Database,
+  code: string,
+  scope: IngestScope,
+): Promise<Map<number, MatchColumns>> {
+  // The window predicate is served by idx_matches_competition_kickoff, so a
+  // match-window run scans the window rather than the season.
+  const statement =
+    scope.kind === 'window'
+      ? db
+          .prepare(
+            `${MATCH_SELECT} WHERE competition_code = ?
+                AND kickoff_utc >= ? AND kickoff_utc < ?`,
+          )
+          .bind(code, scope.dateFrom, scope.storedUpperExclusive)
+      : db.prepare(`${MATCH_SELECT} WHERE competition_code = ?`).bind(code)
+
+  const result = await statement.all<MatchColumns & { id: number }>()
+  const stored = new Map<number, MatchColumns>()
+
+  for (const { id, ...columns } of result.results ?? []) {
+    stored.set(id, columns)
+  }
+
+  return stored
 }
 
 async function nextRunIndex(db: D1Database): Promise<number> {
@@ -219,13 +420,21 @@ async function nextRunIndex(db: D1Database): Promise<number> {
   return row?.run_index ?? 0
 }
 
+/**
+ * Written on every run, unconditionally.
+ *
+ * This is the one row whose whole purpose is to answer "when did we last
+ * check", so making it change-aware would defeat it: a quiet run is exactly
+ * the case where freshness still has to be reported. Two metered writes per
+ * run is a rounding error against the budget the rest of this change frees up.
+ */
 async function recordStatus(
   db: D1Database,
   summary: SyncSummary,
+  now: Date,
   nextIndex?: number,
 ): Promise<void> {
-  const now = new Date().toISOString()
-  const requestsPerDay = EXPECTED_REQUESTS_PER_DAY
+  const stamp = now.toISOString()
 
   await db
     .prepare(
@@ -244,14 +453,14 @@ async function recordStatus(
          updated_at = excluded.updated_at`,
     )
     .bind(
-      now,
+      stamp,
       nextIndex ?? 0,
       JSON.stringify(summary.competitions),
       summary.matchesIngested,
       summary.unresolved,
       JSON.stringify(summary.errors),
-      requestsPerDay,
-      now,
+      EXPECTED_REQUESTS_PER_DAY,
+      stamp,
     )
     .run()
 }

@@ -153,7 +153,14 @@ the cause is the part that generalises.
 
 ---
 
-## Licence
+## Copyright
 
-MIT. Match data belongs to [football-data.org](https://www.football-data.org) and
-is subject to their terms.
+Copyright © 2026 Gadiel Guadarrama. All rights reserved.
+
+This repository is public so the work can be read and evaluated, not so it can
+be reused. No license is granted to copy, modify, distribute or sell the source
+code or substantial portions of it without prior written permission. See
+[COPYRIGHT.md](COPYRIGHT.md).
+
+Match data belongs to [football-data.org](https://www.football-data.org) and is
+subject to their terms.
